@@ -60,7 +60,7 @@
       video, canvas {
         width: 100%;
         height: 100%;
-        object-fit: cover;
+        object-fit: contain;
         display: block;
       }
       canvas {
@@ -225,16 +225,16 @@
 
       function extractPlate(text) {
         const normalized = normalizePlate(text);
-        const match = normalized.match(/[A-Z]{3}\d{4}/);
+        const match = normalized.match(/\b[A-Z]{3}\d{4}\b/);
         return match ? match[0] : '';
       }
 
-      async function readWithOcrSpace(canvas) {
+      async function readWithOcrSpace(canvas, engine) {
         const form = new FormData();
         form.append('apikey', 'helloworld');
         form.append('language', 'eng');
         form.append('scale', 'true');
-        form.append('OCREngine', '3');
+        form.append('OCREngine', String(engine));
         form.append('detectOrientation', 'true');
         form.append('isOverlayRequired', 'false');
         form.append('base64Image', `data:image/png;base64,${canvasToBase64(canvas)}`);
@@ -312,13 +312,20 @@
         ocrEl.appendChild(snapshot);
         statusEl.textContent = 'Leyendo la foto capturada...';
         try {
-          const raw = (await readWithOcrSpace(processed)).trim().replace(/\s+/g, ' ');
-          const rawText = raw || 'Sin texto legible.';
+          const [raw3, raw2] = await Promise.all([
+            readWithOcrSpace(processed, 3).catch(() => ''),
+            readWithOcrSpace(processed, 2).catch(() => ''),
+          ]);
+          const combined = [raw3, raw2].filter(Boolean).join(' | ');
+          const rawText = (combined || 'Sin texto legible.').trim().replace(/\s+/g, ' ');
           const textNode = document.createElement('div');
           textNode.textContent = rawText;
           ocrEl.appendChild(textNode);
 
-          const plate = extractPlate(raw);
+          const candidates = [raw3, raw2, combined]
+            .map(extractPlate)
+            .filter((plate, index, array) => plate && array.indexOf(plate) === index);
+          const plate = candidates[0] || '';
           if (!plate) {
             plateEl.textContent = '---';
             statusEl.textContent = 'OCR leído, pero no apareció una chapa con formato LLLNNNN.';
