@@ -189,31 +189,114 @@
       let stream = null;
       let lastPlate = '';
 
+      const LETTER_FIXES = {
+        0: 'O',
+        1: 'I',
+        2: 'Z',
+        4: 'A',
+        5: 'S',
+        6: 'G',
+        8: 'B',
+      };
+      const DIGIT_FIXES = {
+        O: '0',
+        Q: '0',
+        D: '0',
+        I: '1',
+        L: '1',
+        T: '1',
+        Z: '2',
+        S: '5',
+        B: '8',
+        G: '6',
+      };
+
       const normalizePlate = (text) =>
         text
           .toUpperCase()
-          .replace(/[^A-Z0-9]/g, '')
-          .replace(/^0+/, '');
+          .replace(/Ñ/g, 'N')
+          .replace(/[^A-Z0-9]/g, '');
 
       const isLikelyUruguayPlate = (text) => {
-        const plate = normalizePlate(text);
-        return /^[A-Z]{3}\d{4}$/.test(plate);
+        return Boolean(extractPlate(text).plate);
       };
 
-      function preprocessCanvas(sourceCanvas) {
+      function cropCanvas(sourceCanvas, rect) {
         const out = document.createElement('canvas');
-        out.width = sourceCanvas.width;
-        out.height = sourceCanvas.height;
+        out.width = Math.max(1, Math.round(sourceCanvas.width * rect.w));
+        out.height = Math.max(1, Math.round(sourceCanvas.height * rect.h));
+        out.getContext('2d').drawImage(
+          sourceCanvas,
+          Math.round(sourceCanvas.width * rect.x),
+          Math.round(sourceCanvas.height * rect.y),
+          out.width,
+          out.height,
+          0,
+          0,
+          out.width,
+          out.height
+        );
+        return out;
+      }
+
+      function resizeForOcr(sourceCanvas, minWidth = 1400) {
+        const scale = Math.max(1, minWidth / sourceCanvas.width);
+        const out = document.createElement('canvas');
+        out.width = Math.round(sourceCanvas.width * scale);
+        out.height = Math.round(sourceCanvas.height * scale);
+        const outCtx = out.getContext('2d');
+        outCtx.imageSmoothingEnabled = true;
+        outCtx.imageSmoothingQuality = 'high';
+        outCtx.drawImage(sourceCanvas, 0, 0, out.width, out.height);
+        return out;
+      }
+
+      function preprocessCanvas(sourceCanvas, options = {}) {
+        const {
+          threshold = 150,
+          contrast = 1.35,
+          invert = false,
+          padding = 16,
+        } = options;
+        const resized = resizeForOcr(sourceCanvas);
+        const out = document.createElement('canvas');
+        out.width = resized.width + padding * 2;
+        out.height = resized.height + padding * 2;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
-        outCtx.drawImage(sourceCanvas, 0, 0);
+        outCtx.fillStyle = '#ffffff';
+        outCtx.fillRect(0, 0, out.width, out.height);
+        outCtx.drawImage(resized, padding, padding);
         const image = outCtx.getImageData(0, 0, out.width, out.height);
         const { data } = image;
         for (let i = 0; i < data.length; i += 4) {
           const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-          const boosted = gray > 155 ? 255 : 0;
-          data[i] = boosted;
-          data[i + 1] = boosted;
-          data[i + 2] = boosted;
+          const contrasted = Math.max(0, Math.min(255, (gray - 128) * contrast + 128));
+          const boosted = contrasted > threshold ? 255 : 0;
+          const value = invert ? 255 - boosted : boosted;
+          data[i] = value;
+          data[i + 1] = value;
+          data[i + 2] = value;
+          data[i + 3] = 255;
+        }
+        outCtx.putImageData(image, 0, 0);
+        return out;
+      }
+
+      function grayscaleCanvas(sourceCanvas) {
+        const resized = resizeForOcr(sourceCanvas);
+        const out = document.createElement('canvas');
+        out.width = resized.width;
+        out.height = resized.height;
+        const outCtx = out.getContext('2d', { willReadFrequently: true });
+        outCtx.drawImage(resized, 0, 0);
+        const image = outCtx.getImageData(0, 0, out.width, out.height);
+        const { data } = image;
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          const value = Math.max(0, Math.min(255, (gray - 128) * 1.55 + 128));
+          data[i] = value;
+          data[i + 1] = value;
+          data[i + 2] = value;
           data[i + 3] = 255;
         }
         outCtx.putImageData(image, 0, 0);
@@ -224,18 +307,87 @@
         return canvas.toDataURL('image/png').split(',')[1];
       }
 
-      function extractPlate(text) {
-        const normalized = normalizePlate(text);
-        const match = normalized.match(/\b[A-Z]{3}\d{4}\b/);
-        return match ? match[0] : '';
+      function fixCandidateShape(candidate) {
+        const clean = normalizePlate(candidate);
+        if (clean.length !== 7) return '';
+        const letters = clean
+          .slice(0, 3)
+          .split('')
+          .map((char) => LETTER_FIXES[char] || char)
+          .join('');
+        const digits = clean
+          .slice(3)
+          .split('')
+          .map((char) => DIGIT_FIXES[char] || char)
+          .join('');
+        const plate = letters + digits;
+        return /^[A-Z]{3}\d{4}$/.test(plate) ? plate : '';
       }
 
-      async function readWithOcrSpace(canvas, engine) {
+      function buildPlateCandidates(text) {
+        const normalized = normalizePlate(text);
+        const chunks = [
+          ...text.toUpperCase().matchAll(/[A-Z0-9][A-Z0-9\s\-_.:]{4,12}[A-Z0-9]/g),
+        ].map((match) => normalizePlate(match[0]));
+        const windows = [];
+        for (let i = 0; i <= normalized.length - 7; i += 1) {
+          windows.push(normalized.slice(i, i + 7));
+        }
+        return [...new Set([...chunks, ...windows].filter((item) => item.length >= 7))];
+      }
+
+      function extractPlate(text) {
+        let best = { plate: '', score: 0, raw: '' };
+        for (const candidate of buildPlateCandidates(text)) {
+          const raw = candidate.length === 7 ? candidate : candidate.slice(0, 7);
+          const plate = fixCandidateShape(raw);
+          if (!plate) continue;
+          const score = scorePlateCandidate(plate, raw);
+          if (score > best.score) {
+            best = { plate, score, raw };
+          }
+        }
+        return best;
+      }
+
+      function scorePlateCandidate(plate, raw = plate) {
+        const normalized = normalizePlate(plate);
+        if (!/^[A-Z]{3}\d{4}$/.test(normalized)) return 0;
+        let score = 60;
+        score += normalized.length === 7 ? 20 : 0;
+        score += /[A-Z]{3}/.test(normalized.slice(0, 3)) ? 10 : 0;
+        score += /\d{4}/.test(normalized.slice(3)) ? 10 : 0;
+        score -= [...normalizePlate(raw)].filter((char, index) => normalized[index] !== char).length * 4;
+        return score;
+      }
+
+      function makeOcrAttempts(canvas) {
+        const crops = [
+          { name: 'foto completa', canvas },
+          { name: 'centro ancho', canvas: cropCanvas(canvas, { x: 0.06, y: 0.28, w: 0.88, h: 0.44 }) },
+          { name: 'franja baja', canvas: cropCanvas(canvas, { x: 0.06, y: 0.42, w: 0.88, h: 0.32 }) },
+          { name: 'chapa probable', canvas: cropCanvas(canvas, { x: 0.18, y: 0.36, w: 0.64, h: 0.28 }) },
+        ];
+        const variants = [
+          { label: 'contraste suave', build: (source) => grayscaleCanvas(source) },
+          { label: 'alto contraste', build: (source) => preprocessCanvas(source, { threshold: 150, contrast: 1.45 }) },
+          { label: 'umbral claro', build: (source) => preprocessCanvas(source, { threshold: 175, contrast: 1.65 }) },
+          { label: 'invertido', build: (source) => preprocessCanvas(source, { threshold: 140, contrast: 1.45, invert: true }) },
+        ];
+        return crops.flatMap((crop) =>
+          variants.map((variant) => ({
+            name: `${crop.name} / ${variant.label}`,
+            canvas: variant.build(crop.canvas),
+          }))
+        );
+      }
+
+      async function readWithOcrSpace(canvas) {
         const form = new FormData();
         form.append('apikey', 'helloworld');
         form.append('language', 'eng');
         form.append('scale', 'true');
-        form.append('OCREngine', String(engine));
+        form.append('OCREngine', '3');
         form.append('detectOrientation', 'true');
         form.append('isOverlayRequired', 'false');
         form.append('base64Image', `data:image/png;base64,${canvasToBase64(canvas)}`);
@@ -305,7 +457,6 @@
       }
 
       async function analyzeCapturedCanvas(canvas) {
-        const processed = preprocessCanvas(canvas);
         const snapshot = new Image();
         snapshot.src = canvas.toDataURL('image/png');
         snapshot.alt = 'Foto capturada';
@@ -316,32 +467,42 @@
 
         ocrEl.innerHTML = '';
         ocrEl.appendChild(snapshot);
-        statusEl.textContent = 'Leyendo la foto capturada...';
+        statusEl.textContent = 'Leyendo la foto capturada con varios recortes...';
         try {
-          const [raw3, raw2] = await Promise.all([
-            readWithOcrSpace(processed, 3).catch(() => ''),
-            readWithOcrSpace(processed, 2).catch(() => ''),
-          ]);
-          const combined = [raw3, raw2].filter(Boolean).join(' | ');
-          const rawText = (combined || 'Sin texto legible.').trim().replace(/\s+/g, ' ');
+          const attempts = makeOcrAttempts(canvas);
+          let bestRead = { raw: '', plate: '', score: 0, source: '' };
+
+          for (let i = 0; i < attempts.length; i += 1) {
+            const attempt = attempts[i];
+            statusEl.textContent = `Leyendo imagen ${i + 1}/${attempts.length}: ${attempt.name}...`;
+            const raw = await readWithOcrSpace(attempt.canvas).catch(() => '');
+            const candidate = extractPlate(raw);
+            if (candidate.score > bestRead.score || (!bestRead.raw && raw)) {
+              bestRead = {
+                raw,
+                plate: candidate.plate,
+                score: candidate.score,
+                source: attempt.name,
+              };
+            }
+            if (candidate.score >= 92) break;
+          }
+
+          const rawText = (bestRead.raw || 'Sin texto legible.').trim().replace(/\s+/g, ' ');
           const textNode = document.createElement('div');
-          textNode.textContent = rawText;
+          textNode.textContent = `${rawText}\n\nMejor intento: ${bestRead.source || 'sin coincidencia'} (${Math.round(bestRead.score)}%)`;
           ocrEl.appendChild(textNode);
 
-          const candidates = [raw3, raw2, combined]
-            .map(extractPlate)
-            .filter((plate, index, array) => plate && array.indexOf(plate) === index);
-          const plate = candidates[0] || '';
-          if (!plate) {
+          if (!bestRead.plate || bestRead.score < 76) {
             plateEl.textContent = '---';
-            statusEl.textContent = 'OCR leído, pero no apareció una chapa con formato LLLNNNN.';
+            statusEl.textContent = 'OCR leído, pero no apareció una chapa clara con formato LLLNNNN.';
             return;
           }
 
-          lastPlate = plate;
-          plateEl.textContent = plate;
-          statusEl.innerHTML = `<span class="ok">Chapa detectada:</span> ${plate}`;
-          await fetchOffenses(plate);
+          lastPlate = bestRead.plate;
+          plateEl.textContent = bestRead.plate;
+          statusEl.innerHTML = `<span class="ok">Chapa detectada:</span> ${bestRead.plate}`;
+          await fetchOffenses(bestRead.plate);
         } catch (err) {
           statusEl.innerHTML = `<span class="err">No se pudo leer el OCR:</span> ${String(err.message || err)}`;
         }

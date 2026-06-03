@@ -3,8 +3,8 @@
 App HTML5 simple que:
 
 - abre la cámara con `getUserMedia`
-- corre OCR en el navegador con `tesseract.js`
-- intenta detectar matrículas uruguayas
+- corre OCR con OCR.space desde el navegador
+- prueba varios recortes y preprocesados para detectar matrículas uruguayas
 - consulta `https://chapauy.leak.com.ar/offenses?vehicle=...`
 
 ## Uso local
