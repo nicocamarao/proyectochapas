@@ -173,7 +173,6 @@
       </div>
     </div>
 
-    <script src="https://unpkg.com/ocrad.js@0.3.0/ocrad.min.js"></script>
     <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
     <script>
       const video = document.getElementById('video');
@@ -188,9 +187,9 @@
       const captureBtn = document.getElementById('captureBtn');
 
       let stream = null;
+      let workerPromise = null;
       let worker = null;
       let lastPlate = '';
-      let timer = null;
 
       const normalizePlate = (text) =>
         text
@@ -205,11 +204,17 @@
 
       async function ensureWorker() {
         if (worker) return worker;
-        worker = await Tesseract.createWorker('eng');
-        await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-          tessedit_pageseg_mode: 7,
-        });
+        if (!workerPromise) {
+          workerPromise = Tesseract.createWorker('eng').then(async (w) => {
+            await w.setParameters({
+              tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+              tessedit_pageseg_mode: 7,
+            });
+            worker = w;
+            return w;
+          });
+        }
+        worker = await workerPromise;
         return worker;
       }
 
@@ -233,15 +238,6 @@
         return out;
       }
 
-      function readWithOcrad(canvas) {
-        if (typeof OCRAD !== 'function') return '';
-        try {
-          return (OCRAD(canvas) || '').trim();
-        } catch {
-          return '';
-        }
-      }
-
       async function readWithTesseract(canvas) {
         const w = await ensureWorker();
         const { data } = await w.recognize(canvas);
@@ -257,17 +253,13 @@
         video.srcObject = stream;
         await video.play();
         resizeCanvas();
-        statusEl.textContent = 'Cámara activa. Tocá "Capturar y leer" cuando la chapa esté bien encuadrada.';
+        statusEl.textContent = 'Cámara activa. Tocá "Capturar y leer" para sacar la foto.';
       }
 
       function stopCamera() {
         if (stream) {
           stream.getTracks().forEach((track) => track.stop());
           stream = null;
-        }
-        if (timer) {
-          clearInterval(timer);
-          timer = null;
         }
         statusEl.textContent = 'Cámara detenida.';
       }
@@ -291,23 +283,29 @@
 
       async function analyzeFrame() {
         if (!video.videoWidth) return;
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
         const canvas = document.createElement('canvas');
-        const scale = 1.6;
+        const scale = 2;
         canvas.width = video.videoWidth * scale;
         canvas.height = video.videoHeight * scale;
         const c = canvas.getContext('2d');
         c.drawImage(video, 0, 0, canvas.width, canvas.height);
         const processed = preprocessCanvas(canvas);
+        const snapshot = new Image();
+        snapshot.src = canvas.toDataURL('image/png');
+        snapshot.alt = 'Foto capturada';
+        snapshot.style.width = '100%';
+        snapshot.style.display = 'block';
+        snapshot.style.borderRadius = '16px';
+        snapshot.style.marginBottom = '12px';
 
-        statusEl.textContent = 'Leyendo OCR...';
-        const ocradText = readWithOcrad(processed);
-        const tesseractText = ocradText ? '' : await readWithTesseract(processed);
-        const raw = (ocradText || tesseractText || '').trim().replace(/\s+/g, ' ');
-        ocrEl.textContent = raw || 'Sin texto legible.';
+        ocrEl.innerHTML = '';
+        ocrEl.appendChild(snapshot);
+        statusEl.textContent = 'Leyendo la foto capturada...';
+        const raw = (await readWithTesseract(processed)).trim().replace(/\s+/g, ' ');
+        const rawText = raw || 'Sin texto legible.';
+        const textNode = document.createElement('div');
+        textNode.textContent = rawText;
+        ocrEl.appendChild(textNode);
 
         const lines = raw.split(/[\n\r ]+/).map(normalizePlate).filter(Boolean);
         const candidate = lines.find(isLikelyUruguayPlate) || normalizePlate(raw);
@@ -317,7 +315,6 @@
           lastPlate = plate;
           plateEl.textContent = plate;
           statusEl.innerHTML = `<span class="ok">Chapa detectada:</span> ${plate}`;
-          drawBox(data?.lines?.[0]?.bbox || null);
           await fetchOffenses(plate);
         } else if (plate) {
           plateEl.textContent = plate;
@@ -331,7 +328,11 @@
         offensesEl.innerHTML = '<div class="item">Consultando infracciones...</div>';
         try {
           const url = `https://chapauy.leak.com.ar/offenses?vehicle=${encodeURIComponent(plate)}`;
-          const res = await fetch(url, { mode: 'cors' });
+          const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+          let res = await fetch(proxyUrl, { mode: 'cors' });
+          if (!res.ok) {
+            res = await fetch(url, { mode: 'cors' });
+          }
           const html = await res.text();
           const titleMatch = html.match(/<title>(.*?)<\/title>/i);
           const snippet = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
