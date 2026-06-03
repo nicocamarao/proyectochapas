@@ -80,10 +80,18 @@
         position: relative;
         max-width: 100%;
       }
+      .crop-help {
+        color: #d7e1f3;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        margin-bottom: 10px;
+      }
       #capturedImage {
         width: 100%;
         display: block;
         border-radius: 18px;
+        user-select: none;
+        -webkit-user-drag: none;
       }
       #cropOverlay {
         position: absolute;
@@ -91,6 +99,7 @@
         width: 100%;
         height: 100%;
         cursor: crosshair;
+        touch-action: none;
       }
       .crop-actions {
         display: flex;
@@ -179,6 +188,7 @@
             <canvas id="overlay"></canvas>
           </div>
           <div class="crop-stage" id="cropStage">
+            <div class="crop-help">Arrastrá sobre la chapa para dibujar el recuadro. Después tocá "Leer recorte".</div>
             <div class="crop-image-wrap">
               <img id="capturedImage" alt="Foto capturada" />
               <canvas id="cropOverlay"></canvas>
@@ -235,6 +245,7 @@
       let lastPlate = '';
       let capturedCanvas = null;
       let cropBox = null;
+      let selectionStart = null;
       let isDrawing = false;
 
       const normalizePlate = (text) =>
@@ -283,7 +294,7 @@
         form.append('apikey', 'helloworld');
         form.append('language', 'eng');
         form.append('scale', 'true');
-        form.append('OCREngine', '2');
+        form.append('OCREngine', '3');
         form.append('detectOrientation', 'true');
         form.append('isOverlayRequired', 'false');
         form.append('base64Image', `data:image/png;base64,${canvasToBase64(canvas)}`);
@@ -337,21 +348,21 @@
         ctx.strokeRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0);
       }
 
-      function drawCropBox() {
+      function ensureCropOverlaySize() {
         const rect = cropOverlay.getBoundingClientRect();
+        if (!rect.width || !rect.height) return false;
         cropOverlay.width = rect.width * devicePixelRatio;
         cropOverlay.height = rect.height * devicePixelRatio;
+        return true;
+      }
+
+      function drawCropBox() {
+        if (!ensureCropOverlaySize()) return;
         cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
-        if (!cropBox) {
-          const w = cropOverlay.width * 0.65;
-          const h = cropOverlay.height * 0.22;
-          cropBox = {
-            x: (cropOverlay.width - w) / 2,
-            y: (cropOverlay.height - h) / 2,
-            w,
-            h,
-          };
-        }
+        if (!cropBox) return;
+        cropCtx.fillStyle = 'rgba(10, 15, 25, 0.35)';
+        cropCtx.fillRect(0, 0, cropOverlay.width, cropOverlay.height);
+        cropCtx.clearRect(cropBox.x, cropBox.y, cropBox.w, cropBox.h);
         cropCtx.strokeStyle = '#1f9d7a';
         cropCtx.lineWidth = 4 * devicePixelRatio;
         cropCtx.setLineDash([10 * devicePixelRatio, 8 * devicePixelRatio]);
@@ -359,24 +370,39 @@
         cropCtx.setLineDash([]);
       }
 
-      function pointInCrop(x, y) {
-        return cropBox && x >= cropBox.x && x <= cropBox.x + cropBox.w && y >= cropBox.y && y <= cropBox.y + cropBox.h;
+      function syncCropCanvas() {
+        drawCropBox();
       }
 
-      function canvasPointFromEvent(evt) {
+      function getCropPoint(evt) {
         const rect = cropOverlay.getBoundingClientRect();
         return {
-          x: (evt.clientX - rect.left) * devicePixelRatio,
-          y: (evt.clientY - rect.top) * devicePixelRatio,
+          x: Math.max(0, Math.min((evt.clientX - rect.left) * devicePixelRatio, cropOverlay.width)),
+          y: Math.max(0, Math.min((evt.clientY - rect.top) * devicePixelRatio, cropOverlay.height)),
         };
+      }
+
+      function setCropBoxFromPoints(start, end) {
+        const x1 = Math.min(start.x, end.x);
+        const y1 = Math.min(start.y, end.y);
+        const x2 = Math.max(start.x, end.x);
+        const y2 = Math.max(start.y, end.y);
+        cropBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+      }
+
+      function hasValidCropBox() {
+        return cropBox && cropBox.w > 30 * devicePixelRatio && cropBox.h > 15 * devicePixelRatio;
       }
 
       function startCaptureMode(canvas) {
         capturedCanvas = canvas;
         capturedImage.src = canvas.toDataURL('image/png');
         cropStage.classList.add('active');
-        statusEl.textContent = 'Seleccioná el área de la chapa y luego tocá "Leer recorte".';
-        requestAnimationFrame(drawCropBox);
+        cropBox = null;
+        selectionStart = null;
+        isDrawing = false;
+        statusEl.textContent = 'Arrastrá para seleccionar la chapa y luego tocá "Leer recorte".';
+        requestAnimationFrame(syncCropCanvas);
       }
 
       function hideCaptureMode() {
@@ -384,11 +410,18 @@
         cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
         capturedCanvas = null;
         cropBox = null;
+        selectionStart = null;
         isDrawing = false;
       }
 
+      capturedImage.addEventListener('load', () => {
+        if (cropStage.classList.contains('active')) {
+          requestAnimationFrame(syncCropCanvas);
+        }
+      });
+
       function cropCapturedArea() {
-        if (!capturedCanvas || !cropBox) return null;
+        if (!capturedCanvas || !hasValidCropBox()) return null;
         const scaleX = capturedCanvas.width / cropOverlay.width;
         const scaleY = capturedCanvas.height / cropOverlay.height;
         const sx = cropBox.x * scaleX;
@@ -405,27 +438,32 @@
       async function runOcrOnCrop() {
         const processed = cropCapturedArea();
         if (!processed) {
-          statusEl.textContent = 'Seleccioná un área válida antes de leer.';
+          statusEl.textContent = 'Dibujá un recuadro válido sobre la chapa antes de leer.';
           return;
         }
-        statusEl.textContent = 'Leyendo el recorte...';
-        const raw = (await readWithOcrSpace(processed)).trim().replace(/\s+/g, ' ');
-        const rawText = raw || 'Sin texto legible.';
-        ocrEl.innerHTML = '';
-        const textNode = document.createElement('div');
-        textNode.textContent = rawText;
-        ocrEl.appendChild(textNode);
+        statusEl.textContent = 'Leyendo el recuadro seleccionado...';
+        try {
+          const raw = (await readWithOcrSpace(processed)).trim().replace(/\s+/g, ' ');
+          const rawText = raw || 'Sin texto legible.';
+          ocrEl.innerHTML = '';
+          const textNode = document.createElement('div');
+          textNode.textContent = rawText;
+          ocrEl.appendChild(textNode);
 
-        const plate = extractPlate(raw);
-        if (plate && plate !== lastPlate) {
+          const plate = extractPlate(raw);
+          if (!plate) {
+            plateEl.textContent = '---';
+            statusEl.textContent = 'OCR leído, pero no apareció una chapa con formato LLLNNNN. Probá ajustar el recuadro.';
+            return;
+          }
+
           lastPlate = plate;
           plateEl.textContent = plate;
           statusEl.innerHTML = `<span class="ok">Chapa detectada:</span> ${plate}`;
           await fetchOffenses(plate);
           hideCaptureMode();
-        } else {
-          plateEl.textContent = '---';
-          statusEl.textContent = 'No se detectó una chapa válida. Debe ser formato LLLNNNN.';
+        } catch (err) {
+          statusEl.innerHTML = `<span class="err">No se pudo leer el OCR:</span> ${String(err.message || err)}`;
         }
       }
 
@@ -439,30 +477,51 @@
         startCaptureMode(canvas);
       }
 
+      async function fetchTextWithTimeout(url, timeoutMs = 9000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(url, { mode: 'cors', signal: controller.signal });
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          return await res.text();
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
       async function fetchOffenses(plate) {
         offensesEl.innerHTML = '<div class="item">Consultando infracciones...</div>';
+        statusEl.textContent = 'Consultando infracciones...';
         try {
           const url = `https://chapauy.leak.com.ar/offenses?vehicle=${encodeURIComponent(plate)}`;
           const proxyUrls = [
             `https://corsproxy.io/?${encodeURIComponent(url)}`,
             `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+            `https://r.jina.ai/https://chapauy.leak.com.ar/offenses?vehicle=${encodeURIComponent(plate)}`,
           ];
-          let res = null;
-          let html = '';
+          let pageText = '';
+          let lastError = null;
           for (const proxyUrl of proxyUrls) {
             try {
-              res = await fetch(proxyUrl, { mode: 'cors' });
-              if (res.ok) {
-                html = await res.text();
+              pageText = await fetchTextWithTimeout(proxyUrl);
+              if (pageText && pageText.trim().length > 0) {
                 break;
               }
-            } catch (_) {
-              // probar siguiente proxy
+            } catch (err) {
+              lastError = err;
             }
           }
-          if (!html) throw new Error('No se pudo leer la página de infracciones por CORS.');
-          const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-          const snippet = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+          if (!pageText) throw lastError || new Error('No se pudo leer la página de infracciones por CORS.');
+          const titleMatch = pageText.match(/<title>(.*?)<\/title>/i);
+          const snippet = pageText
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500);
           offensesEl.innerHTML = `
             <div class="item">
               <div class="label">URL consultada</div>
@@ -477,8 +536,10 @@
               <div>${snippet || 'Sin contenido visible.'}</div>
             </div>
           `;
+          statusEl.textContent = `Infracciones consultadas para ${plate}.`;
         } catch (err) {
           offensesEl.innerHTML = `<div class="item"><span class="err">No se pudo consultar el sitio.</span><br>${String(err.message || err)}</div>`;
+          statusEl.innerHTML = `<span class="err">No se pudo consultar infracciones:</span> ${String(err.message || err)}`;
         }
       }
 
@@ -497,22 +558,22 @@
       });
       cropOverlay.addEventListener('pointerdown', (evt) => {
         if (!capturedCanvas) return;
-        const p = canvasPointFromEvent(evt);
-        if (pointInCrop(p.x, p.y)) {
-          isDrawing = true;
-          cropBox.dragX = p.x - cropBox.x;
-          cropBox.dragY = p.y - cropBox.y;
-        }
+        isDrawing = true;
+        selectionStart = getCropPoint(evt);
+        cropBox = { x: selectionStart.x, y: selectionStart.y, w: 1, h: 1 };
+        cropOverlay.setPointerCapture?.(evt.pointerId);
+        drawCropBox();
       });
       cropOverlay.addEventListener('pointermove', (evt) => {
         if (!capturedCanvas || !isDrawing) return;
-        const p = canvasPointFromEvent(evt);
-        cropBox.x = Math.max(0, Math.min(p.x - cropBox.dragX, cropOverlay.width - cropBox.w));
-        cropBox.y = Math.max(0, Math.min(p.y - cropBox.dragY, cropOverlay.height - cropBox.h));
+        const p = getCropPoint(evt);
+        setCropBoxFromPoints(selectionStart, p);
         drawCropBox();
       });
-      cropOverlay.addEventListener('pointerup', () => {
+      cropOverlay.addEventListener('pointerup', (evt) => {
         isDrawing = false;
+        cropOverlay.releasePointerCapture?.(evt.pointerId);
+        drawCropBox();
       });
       cropOverlay.addEventListener('pointerleave', () => {
         isDrawing = false;
