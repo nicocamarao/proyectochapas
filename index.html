@@ -150,7 +150,7 @@
           </div>
           <div class="controls">
             <button class="primary" id="startBtn">Activar cámara</button>
-            <button class="secondary" id="captureBtn">Analizar ahora</button>
+            <button class="secondary" id="captureBtn">Capturar y leer</button>
             <button class="secondary" id="stopBtn">Detener</button>
           </div>
         </section>
@@ -173,6 +173,7 @@
       </div>
     </div>
 
+    <script src="https://unpkg.com/ocrad.js@0.3.0/ocrad.min.js"></script>
     <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
     <script>
       const video = document.getElementById('video');
@@ -212,6 +213,41 @@
         return worker;
       }
 
+      function preprocessCanvas(sourceCanvas) {
+        const out = document.createElement('canvas');
+        out.width = sourceCanvas.width;
+        out.height = sourceCanvas.height;
+        const outCtx = out.getContext('2d', { willReadFrequently: true });
+        outCtx.drawImage(sourceCanvas, 0, 0);
+        const image = outCtx.getImageData(0, 0, out.width, out.height);
+        const { data } = image;
+        for (let i = 0; i < data.length; i += 4) {
+          const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+          const boosted = gray > 155 ? 255 : 0;
+          data[i] = boosted;
+          data[i + 1] = boosted;
+          data[i + 2] = boosted;
+          data[i + 3] = 255;
+        }
+        outCtx.putImageData(image, 0, 0);
+        return out;
+      }
+
+      function readWithOcrad(canvas) {
+        if (typeof OCRAD !== 'function') return '';
+        try {
+          return (OCRAD(canvas) || '').trim();
+        } catch {
+          return '';
+        }
+      }
+
+      async function readWithTesseract(canvas) {
+        const w = await ensureWorker();
+        const { data } = await w.recognize(canvas);
+        return (data.text || '').trim();
+      }
+
       async function startCamera() {
         if (stream) return;
         stream = await navigator.mediaDevices.getUserMedia({
@@ -221,18 +257,17 @@
         video.srcObject = stream;
         await video.play();
         resizeCanvas();
-        statusEl.textContent = 'Cámara activa. Buscando chapa...';
-        if (!timer) timer = setInterval(analyzeFrame, 2500);
+        statusEl.textContent = 'Cámara activa. Tocá "Capturar y leer" cuando la chapa esté bien encuadrada.';
       }
 
       function stopCamera() {
-        if (timer) {
-          clearInterval(timer);
-          timer = null;
-        }
         if (stream) {
           stream.getTracks().forEach((track) => track.stop());
           stream = null;
+        }
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
         }
         statusEl.textContent = 'Cámara detenida.';
       }
@@ -256,17 +291,22 @@
 
       async function analyzeFrame() {
         if (!video.videoWidth) return;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         const canvas = document.createElement('canvas');
-        const scale = 1.2;
+        const scale = 1.6;
         canvas.width = video.videoWidth * scale;
         canvas.height = video.videoHeight * scale;
         const c = canvas.getContext('2d');
         c.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const processed = preprocessCanvas(canvas);
 
         statusEl.textContent = 'Leyendo OCR...';
-        const w = await ensureWorker();
-        const { data } = await w.recognize(canvas);
-        const raw = (data.text || '').trim().replace(/\s+/g, ' ');
+        const ocradText = readWithOcrad(processed);
+        const tesseractText = ocradText ? '' : await readWithTesseract(processed);
+        const raw = (ocradText || tesseractText || '').trim().replace(/\s+/g, ' ');
         ocrEl.textContent = raw || 'Sin texto legible.';
 
         const lines = raw.split(/[\n\r ]+/).map(normalizePlate).filter(Boolean);
@@ -282,6 +322,8 @@
         } else if (plate) {
           plateEl.textContent = plate;
           statusEl.textContent = 'Texto detectado, pero aún no parece una chapa válida.';
+        } else {
+          statusEl.textContent = 'No se pudo leer una chapa clara. Probá acercando la cámara y presionando Capturar otra vez.';
         }
       }
 
