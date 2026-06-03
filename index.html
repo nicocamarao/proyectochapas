@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OCR de Chapa UY</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --panel: rgba(255, 255, 255, 0.9);
+        --text: #0f172a;
+        --muted: #5b6476;
+        --accent: #0f5db8;
+        --accent-2: #1f9d7a;
+        --border: rgba(15, 23, 42, 0.12);
+        --shadow: 0 18px 50px rgba(15, 23, 42, 0.14);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(15, 93, 184, 0.14), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(31, 157, 122, 0.14), transparent 26%),
+          var(--bg);
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: flex-end;
+        margin-bottom: 20px;
+      }
+      h1 { margin: 0; font-size: clamp(1.8rem, 3vw, 3rem); }
+      p { margin: 0; color: var(--muted); line-height: 1.5; }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.25fr 0.75fr;
+        gap: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+      .viewer {
+        position: relative;
+        min-height: 540px;
+        background: #09111f;
+      }
+      video, canvas {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      canvas {
+        position: absolute;
+        inset: 0;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        padding: 14px;
+        border-top: 1px solid var(--border);
+      }
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .primary { background: var(--accent); color: white; }
+      .secondary { background: #e7eef8; color: var(--text); }
+      .status {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(15, 93, 184, 0.05);
+      }
+      .panel {
+        padding: 16px;
+      }
+      .label {
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .plate {
+        font-size: clamp(2rem, 6vw, 3.5rem);
+        font-weight: 900;
+        letter-spacing: 0.16em;
+        margin: 0 0 10px;
+      }
+      .result {
+        font-size: 1rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .list {
+        display: grid;
+        gap: 10px;
+      }
+      .item {
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 12px;
+        background: white;
+      }
+      .hint {
+        font-size: 0.93rem;
+        color: var(--muted);
+      }
+      .ok { color: var(--accent-2); font-weight: 700; }
+      .err { color: #c0392b; font-weight: 700; }
+      @media (max-width: 920px) {
+        .grid { grid-template-columns: 1fr; }
+        .viewer { min-height: 360px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1>OCR de chapa uruguaya</h1>
+          <p>Abre la cámara, detecta la matrícula automáticamente y consulta infracciones en línea.</p>
+        </div>
+      </header>
+
+      <div class="grid">
+        <section class="card">
+          <div class="viewer">
+            <video id="video" playsinline autoplay muted></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="controls">
+            <button class="primary" id="startBtn">Activar cámara</button>
+            <button class="secondary" id="captureBtn">Analizar ahora</button>
+            <button class="secondary" id="stopBtn">Detener</button>
+          </div>
+        </section>
+
+        <aside class="card">
+          <div class="status" id="status">Listo para empezar.</div>
+          <div class="panel">
+            <div class="label">Chapa detectada</div>
+            <div class="plate" id="plate">---</div>
+            <div class="label">OCR / respuesta</div>
+            <div class="result" id="ocrText">Todavía no se analizó ninguna imagen.</div>
+          </div>
+          <div class="panel">
+            <div class="label">Infracciones</div>
+            <div class="list" id="offenses">
+              <div class="item hint">Cuando aparezca una chapa válida, acá se mostrarán los resultados del sitio.</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script>
+      const video = document.getElementById('video');
+      const overlay = document.getElementById('overlay');
+      const ctx = overlay.getContext('2d');
+      const statusEl = document.getElementById('status');
+      const plateEl = document.getElementById('plate');
+      const ocrEl = document.getElementById('ocrText');
+      const offensesEl = document.getElementById('offenses');
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const captureBtn = document.getElementById('captureBtn');
+
+      let stream = null;
+      let worker = null;
+      let lastPlate = '';
+      let timer = null;
+
+      const normalizePlate = (text) =>
+        text
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, '')
+          .replace(/^0+/, '');
+
+      const isLikelyUruguayPlate = (text) => {
+        const plate = normalizePlate(text);
+        return /^[A-Z]{3}\d{4}$/.test(plate) || /^[A-Z]{3}\d{3}$/.test(plate) || /^[A-Z]{2}\d{4}$/.test(plate);
+      };
+
+      async function ensureWorker() {
+        if (worker) return worker;
+        worker = await Tesseract.createWorker('eng');
+        await worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+          tessedit_pageseg_mode: 7,
+        });
+        return worker;
+      }
+
+      async function startCamera() {
+        if (stream) return;
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        resizeCanvas();
+        statusEl.textContent = 'Cámara activa. Buscando chapa...';
+        if (!timer) timer = setInterval(analyzeFrame, 2500);
+      }
+
+      function stopCamera() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+        statusEl.textContent = 'Cámara detenida.';
+      }
+
+      function resizeCanvas() {
+        const rect = video.getBoundingClientRect();
+        overlay.width = rect.width * devicePixelRatio;
+        overlay.height = rect.height * devicePixelRatio;
+        overlay.style.width = rect.width + 'px';
+        overlay.style.height = rect.height + 'px';
+      }
+
+      function drawBox(box) {
+        resizeCanvas();
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        if (!box) return;
+        ctx.strokeStyle = '#1f9d7a';
+        ctx.lineWidth = 4 * devicePixelRatio;
+        ctx.strokeRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0);
+      }
+
+      async function analyzeFrame() {
+        if (!video.videoWidth) return;
+        const canvas = document.createElement('canvas');
+        const scale = 1.2;
+        canvas.width = video.videoWidth * scale;
+        canvas.height = video.videoHeight * scale;
+        const c = canvas.getContext('2d');
+        c.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        statusEl.textContent = 'Leyendo OCR...';
+        const w = await ensureWorker();
+        const { data } = await w.recognize(canvas);
+        const raw = (data.text || '').trim().replace(/\s+/g, ' ');
+        ocrEl.textContent = raw || 'Sin texto legible.';
+
+        const lines = raw.split(/[\n\r ]+/).map(normalizePlate).filter(Boolean);
+        const candidate = lines.find(isLikelyUruguayPlate) || normalizePlate(raw);
+        const plate = normalizePlate(candidate).slice(0, 7);
+
+        if (plate && plate !== lastPlate && isLikelyUruguayPlate(plate)) {
+          lastPlate = plate;
+          plateEl.textContent = plate;
+          statusEl.innerHTML = `<span class="ok">Chapa detectada:</span> ${plate}`;
+          drawBox(data?.lines?.[0]?.bbox || null);
+          await fetchOffenses(plate);
+        } else if (plate) {
+          plateEl.textContent = plate;
+          statusEl.textContent = 'Texto detectado, pero aún no parece una chapa válida.';
+        }
+      }
+
+      async function fetchOffenses(plate) {
+        offensesEl.innerHTML = '<div class="item">Consultando infracciones...</div>';
+        try {
+          const url = `https://chapauy.leak.com.ar/offenses?vehicle=${encodeURIComponent(plate)}`;
+          const res = await fetch(url, { mode: 'cors' });
+          const html = await res.text();
+          const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+          const snippet = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+          offensesEl.innerHTML = `
+            <div class="item">
+              <div class="label">URL consultada</div>
+              <div>${url}</div>
+            </div>
+            <div class="item">
+              <div class="label">Título</div>
+              <div>${titleMatch ? titleMatch[1] : 'Sin título'}</div>
+            </div>
+            <div class="item">
+              <div class="label">Vista rápida</div>
+              <div>${snippet || 'Sin contenido visible.'}</div>
+            </div>
+          `;
+        } catch (err) {
+          offensesEl.innerHTML = `<div class="item"><span class="err">No se pudo consultar el sitio.</span><br>${String(err.message || err)}</div>`;
+        }
+      }
+
+      startBtn.addEventListener('click', async () => {
+        try {
+          await startCamera();
+        } catch (err) {
+          statusEl.innerHTML = `<span class="err">Error al abrir la cámara:</span> ${String(err.message || err)}`;
+        }
+      });
+      captureBtn.addEventListener('click', analyzeFrame);
+      stopBtn.addEventListener('click', stopCamera);
+      window.addEventListener('resize', resizeCanvas);
+    </script>
+  </body>
+  </html>
