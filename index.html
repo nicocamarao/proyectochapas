@@ -244,6 +244,9 @@
           body: form,
         });
         const json = await res.json();
+        if (json?.IsErroredOnProcessing) {
+          throw new Error(json?.ErrorMessage?.[0] || 'OCR.space no pudo procesar la imagen.');
+        }
         const parsed = json?.ParsedResults?.[0]?.ParsedText || '';
         return parsed.trim();
       }
@@ -331,10 +334,8 @@
         try {
           const url = `https://chapauy.leak.com.ar/offenses?vehicle=${encodeURIComponent(plate)}`;
           const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-          let res = await fetch(proxyUrl, { mode: 'cors' });
-          if (!res.ok) {
-            res = await fetch(url, { mode: 'cors' });
-          }
+          const res = await fetch(proxyUrl, { mode: 'cors' });
+          if (!res.ok) throw new Error('No se pudo leer la página de infracciones.');
           const html = await res.text();
           const titleMatch = html.match(/<title>(.*?)<\/title>/i);
           const snippet = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
