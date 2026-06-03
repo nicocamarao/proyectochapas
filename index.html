@@ -66,6 +66,7 @@
       canvas {
         position: absolute;
         inset: 0;
+        pointer-events: none;
       }
       .controls {
         display: flex;
@@ -290,12 +291,17 @@
 
       async function analyzeFrame() {
         if (!video.videoWidth) return;
-        const canvas = document.createElement('canvas');
+        const frameCanvas = document.createElement('canvas');
+        frameCanvas.width = video.videoWidth;
+        frameCanvas.height = video.videoHeight;
+        frameCanvas.getContext('2d').drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+
+        const ocrCanvas = document.createElement('canvas');
         const scale = 2;
-        canvas.width = video.videoWidth * scale;
-        canvas.height = video.videoHeight * scale;
-        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-        await analyzeCapturedCanvas(canvas);
+        ocrCanvas.width = frameCanvas.width * scale;
+        ocrCanvas.height = frameCanvas.height * scale;
+        ocrCanvas.getContext('2d').drawImage(frameCanvas, 0, 0, ocrCanvas.width, ocrCanvas.height);
+        await analyzeCapturedCanvas(ocrCanvas);
       }
 
       async function analyzeCapturedCanvas(canvas) {
